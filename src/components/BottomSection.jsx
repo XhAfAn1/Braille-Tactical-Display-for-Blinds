@@ -1,11 +1,18 @@
 import React, { useRef, useEffect } from 'react';
 import { LayoutGrid } from 'lucide-react';
 
-const BottomSection = ({ mode, sourceData, matrixSize, rawVideoRef, rawImageRef }) => {
+const BottomSection = ({ mode, sourceData, matrixSize, clearDrawTrigger, serialWriterRef, rawVideoRef, rawImageRef }) => {
   const displayCanvasRef = useRef(null);
   const hiddenCanvasRef = useRef(null);
   const localVideoRef = useRef(null); // Local video that stays in viewport
   const requestRef = useRef();
+
+  const drawStateRef = useRef(new Uint8Array(matrixSize.rows * matrixSize.cols));
+  const isDrawingRef = useRef(false);
+  const drawActionRef = useRef(1); // 1 for ON, 0 for OFF
+  
+  const isWritingSerialRef = useRef(false);
+  const lastWriteTimeRef = useRef(0);
 
   // Pre-rendered pin canvases for extreme performance
   const offscreenPinsRef = useRef({ on: null, off: null, cellSize: 0 });
@@ -16,6 +23,51 @@ const BottomSection = ({ mode, sourceData, matrixSize, rawVideoRef, rawImageRef 
       localVideoRef.current.srcObject = sourceData;
     }
   }, [mode, sourceData]);
+
+  useEffect(() => {
+    const size = matrixSize.rows * matrixSize.cols;
+    if (drawStateRef.current.length !== size) {
+      drawStateRef.current = new Uint8Array(size);
+    } else {
+      drawStateRef.current.fill(0);
+    }
+  }, [matrixSize, clearDrawTrigger]);
+
+  const handleInteraction = (e, isClick = false) => {
+    if (mode !== 'draw' || !displayCanvasRef.current) return;
+    
+    if (!isClick && !isDrawingRef.current) return;
+
+    const rect = displayCanvasRef.current.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+
+    const { rows, cols } = matrixSize;
+    const maxDisplaySize = 600;
+    const cellSize = Math.max(4, Math.floor(maxDisplaySize / Math.max(cols, rows)));
+    
+    const col = Math.floor(x / cellSize);
+    const row = Math.floor(y / cellSize);
+
+    if (row >= 0 && row < rows && col >= 0 && col < cols) {
+      const index = row * cols + col;
+      if (isClick) {
+        const newVal = drawStateRef.current[index] === 1 ? 0 : 1;
+        drawStateRef.current[index] = newVal;
+        drawActionRef.current = newVal;
+      } else {
+        drawStateRef.current[index] = drawActionRef.current;
+      }
+    }
+  };
+
+  const handleMouseDown = (e) => {
+    isDrawingRef.current = true;
+    handleInteraction(e, true);
+  };
+  const handleMouseMove = (e) => handleInteraction(e, false);
+  const handleMouseUp = () => { isDrawingRef.current = false; };
+  const handleMouseLeave = () => { isDrawingRef.current = false; };
 
   const createOffscreenPins = (cellSize) => {
     if (offscreenPinsRef.current.cellSize === cellSize && offscreenPinsRef.current.on) {
@@ -92,7 +144,18 @@ const BottomSection = ({ mode, sourceData, matrixSize, rawVideoRef, rawImageRef 
     dCtx.fillStyle = '#0a0a0f';
     dCtx.fillRect(0, 0, targetWidth, targetHeight);
 
-    if (source) {
+    const matrixData = new Uint8Array(rows * cols);
+
+    if (mode === 'draw') {
+      for (let y = 0; y < rows; y++) {
+        for (let x = 0; x < cols; x++) {
+          const index = y * cols + x;
+          const isOn = drawStateRef.current[index] === 1;
+          matrixData[index] = isOn ? 1 : 0;
+          dCtx.drawImage(isOn ? pins.on : pins.off, x * cellSize, y * cellSize);
+        }
+      }
+    } else if (source) {
       const sourceWidth = source.videoWidth || source.naturalWidth || source.width;
       const sourceHeight = source.videoHeight || source.naturalHeight || source.height;
 
@@ -125,6 +188,7 @@ const BottomSection = ({ mode, sourceData, matrixSize, rawVideoRef, rawImageRef 
           
           const brightness = 0.299 * r + 0.587 * g + 0.114 * b;
           const isOn = brightness > 127;
+          matrixData[y * cols + x] = isOn ? 1 : 0;
           
           dCtx.drawImage(isOn ? pins.on : pins.off, x * cellSize, y * cellSize);
         }
@@ -135,6 +199,36 @@ const BottomSection = ({ mode, sourceData, matrixSize, rawVideoRef, rawImageRef 
           dCtx.drawImage(pins.off, x * cellSize, y * cellSize);
         }
       }
+    }
+
+    // Web Serial Data Transmission (Throttled to ~30 FPS)
+    const now = performance.now();
+    if (serialWriterRef?.current && !isWritingSerialRef.current && now - lastWriteTimeRef.current > 33) {
+      const payload = new Uint8Array(rows + 1);
+      payload[0] = 255; // Start marker
+      
+      const maxCols = Math.min(cols, 8); // Support up to 8 cols per byte to match python logic
+      
+      for (let r = 0; r < rows; r++) {
+        let rowByte = 255; // Default all OFF
+        for (let c = 0; c < maxCols; c++) {
+          if (matrixData[r * cols + c] === 1) {
+            const shiftAmount = maxCols - c;
+            if (shiftAmount >= 0 && shiftAmount < 8) {
+              rowByte &= ~(1 << shiftAmount);
+            }
+          }
+        }
+        payload[r + 1] = rowByte;
+      }
+      
+      isWritingSerialRef.current = true;
+      lastWriteTimeRef.current = now;
+      serialWriterRef.current.write(payload).catch(e => {
+        console.error("Serial write failed:", e);
+      }).finally(() => {
+        isWritingSerialRef.current = false;
+      });
     }
 
     requestRef.current = requestAnimationFrame(processFrame);
@@ -160,7 +254,14 @@ const BottomSection = ({ mode, sourceData, matrixSize, rawVideoRef, rawImageRef 
           style={{ position: 'absolute', width: '10px', height: '10px', opacity: 0.01, pointerEvents: 'none' }} 
         />
         <canvas ref={hiddenCanvasRef} style={{ display: 'none' }} />
-        <canvas ref={displayCanvasRef} />
+        <canvas 
+          ref={displayCanvasRef} 
+          onMouseDown={handleMouseDown}
+          onMouseMove={handleMouseMove}
+          onMouseUp={handleMouseUp}
+          onMouseLeave={handleMouseLeave}
+          style={{ cursor: mode === 'draw' ? 'crosshair' : 'default' }}
+        />
       </div>
     </div>
   );
