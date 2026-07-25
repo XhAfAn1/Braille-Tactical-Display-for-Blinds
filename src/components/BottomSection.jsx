@@ -1,7 +1,7 @@
 import React, { useRef, useEffect } from 'react';
 import { LayoutGrid } from 'lucide-react';
 
-const BottomSection = ({ mode, sourceData, matrixSize, clearDrawTrigger, serialWriterRef, rawVideoRef, rawImageRef }) => {
+const BottomSection = ({ mode, sourceData, matrixSize, clearDrawTrigger, serialConnected, serialWriterRef, rawVideoRef, rawImageRef }) => {
   const displayCanvasRef = useRef(null);
   const hiddenCanvasRef = useRef(null);
   const localVideoRef = useRef(null); // Local video that stays in viewport
@@ -13,6 +13,13 @@ const BottomSection = ({ mode, sourceData, matrixSize, clearDrawTrigger, serialW
   
   const isWritingSerialRef = useRef(false);
   const lastWriteTimeRef = useRef(0);
+  const lastSentStateRef = useRef(new Uint8Array(0));
+
+  useEffect(() => {
+    if (!serialConnected) {
+      lastSentStateRef.current = new Uint8Array(0);
+    }
+  }, [serialConnected]);
 
   // Pre-rendered pin canvases for extreme performance
   const offscreenPinsRef = useRef({ on: null, off: null, cellSize: 0 });
@@ -204,31 +211,34 @@ const BottomSection = ({ mode, sourceData, matrixSize, clearDrawTrigger, serialW
     // Web Serial Data Transmission (Throttled to ~30 FPS)
     const now = performance.now();
     if (serialWriterRef?.current && !isWritingSerialRef.current && now - lastWriteTimeRef.current > 33) {
-      const payload = new Uint8Array(rows + 1);
-      payload[0] = 255; // Start marker
-      
-      const maxCols = Math.min(cols, 8); // Support up to 8 cols per byte to match python logic
-      
-      for (let r = 0; r < rows; r++) {
-        let rowByte = 255; // Default all OFF
-        for (let c = 0; c < maxCols; c++) {
-          if (matrixData[r * cols + c] === 1) {
-            const shiftAmount = maxCols - c;
-            if (shiftAmount >= 0 && shiftAmount < 8) {
-              rowByte &= ~(1 << shiftAmount);
-            }
-          }
-        }
-        payload[r + 1] = rowByte;
+      const totalPins = rows * cols;
+      if (lastSentStateRef.current.length !== totalPins) {
+        lastSentStateRef.current = new Uint8Array(totalPins);
+        lastSentStateRef.current.fill(255); // Fill with dummy value so initial state is sent on connect
       }
-      
-      isWritingSerialRef.current = true;
-      lastWriteTimeRef.current = now;
-      serialWriterRef.current.write(payload).catch(e => {
-        console.error("Serial write failed:", e);
-      }).finally(() => {
-        isWritingSerialRef.current = false;
-      });
+
+      let commandString = "";
+      for (let i = 0; i < totalPins; i++) {
+        const state = matrixData[i] === 1 ? 1 : 0;
+        if (state !== lastSentStateRef.current[i]) {
+          // Map UI index (0 to totalPins - 1) to hardware index (reversed: totalPins - 1 - i)
+          // For a 3x3 matrix (9 pins), this matches ui_controller.py mapping: [8, 7, 6, 5, 4, 3, 2, 1, 0]
+          const hwIdx = (totalPins - 1) - i;
+          commandString += `L${hwIdx}${state}\n`;
+          lastSentStateRef.current[i] = state;
+        }
+      }
+
+      if (commandString.length > 0) {
+        isWritingSerialRef.current = true;
+        lastWriteTimeRef.current = now;
+        const payload = new TextEncoder().encode(commandString);
+        serialWriterRef.current.write(payload).catch(e => {
+          console.error("Serial write failed:", e);
+        }).finally(() => {
+          isWritingSerialRef.current = false;
+        });
+      }
     }
 
     requestRef.current = requestAnimationFrame(processFrame);

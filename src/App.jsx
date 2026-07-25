@@ -6,7 +6,7 @@ import BottomSection from './components/BottomSection';
 function App() {
   const [mode, setMode] = useState(null); // 'image', 'mirror', or 'draw'
   const [sourceData, setSourceData] = useState(null); // imageUrl or MediaStream
-  const [matrixSize, setMatrixSize] = useState({ rows: 32, cols: 32 });
+  const [matrixSize, setMatrixSize] = useState({ rows: 3, cols: 3 });
   const [clearDrawTrigger, setClearDrawTrigger] = useState(0);
   const rawVideoRef = useRef(null);
   const rawImageRef = useRef(null);
@@ -108,6 +108,7 @@ function App() {
         sourceData={sourceData}
         matrixSize={matrixSize}
         clearDrawTrigger={clearDrawTrigger}
+        serialConnected={serialConnected}
         serialWriterRef={serialWriterRef}
         rawVideoRef={rawVideoRef}
         rawImageRef={rawImageRef}
