@@ -14,6 +14,9 @@ const BottomSection = ({ mode, sourceData, matrixSize, clearDrawTrigger, serialC
   const isWritingSerialRef = useRef(false);
   const lastWriteTimeRef = useRef(0);
   const lastSentStateRef = useRef(new Uint8Array(0));
+  
+  const lastDrawnStateRef = useRef(new Uint8Array(0));
+  const lastDrawnSizeRef = useRef({ rows: 0, cols: 0, cellSize: 0 });
 
   useEffect(() => {
     if (!serialConnected) {
@@ -147,9 +150,13 @@ const BottomSection = ({ mode, sourceData, matrixSize, clearDrawTrigger, serialC
       source = localVideoRef.current;
     }
 
-    // Clear display
-    dCtx.fillStyle = '#0a0a0f';
-    dCtx.fillRect(0, 0, targetWidth, targetHeight);
+    if (lastDrawnStateRef.current.length !== rows * cols || cellSize !== lastDrawnSizeRef.current.cellSize) {
+      lastDrawnStateRef.current = new Uint8Array(rows * cols);
+      lastDrawnStateRef.current.fill(255); // Force full redraw on resize/first run
+      lastDrawnSizeRef.current = { rows, cols, cellSize };
+      dCtx.fillStyle = '#0a0a0f';
+      dCtx.fillRect(0, 0, targetWidth, targetHeight);
+    }
 
     const matrixData = new Uint8Array(rows * cols);
 
@@ -158,8 +165,15 @@ const BottomSection = ({ mode, sourceData, matrixSize, clearDrawTrigger, serialC
         for (let x = 0; x < cols; x++) {
           const index = y * cols + x;
           const isOn = drawStateRef.current[index] === 1;
-          matrixData[index] = isOn ? 1 : 0;
-          dCtx.drawImage(isOn ? pins.on : pins.off, x * cellSize, y * cellSize);
+          const state = isOn ? 1 : 0;
+          matrixData[index] = state;
+          
+          if (state !== lastDrawnStateRef.current[index]) {
+            dCtx.fillStyle = '#0a0a0f';
+            dCtx.fillRect(x * cellSize, y * cellSize, cellSize, cellSize);
+            dCtx.drawImage(isOn ? pins.on : pins.off, x * cellSize, y * cellSize);
+            lastDrawnStateRef.current[index] = state;
+          }
         }
       }
     } else if (source) {
@@ -170,7 +184,10 @@ const BottomSection = ({ mode, sourceData, matrixSize, clearDrawTrigger, serialC
         hCtx.fillStyle = 'black';
         hCtx.fillRect(0, 0, cols, rows);
 
-        const scale = Math.min(cols / sourceWidth, rows / sourceHeight);
+        // Use Math.max for 'cover' behavior instead of 'contain' (Math.min).
+        // This ensures the image fills the entire matrix without dead black bars,
+        // which is especially important for small matrices like 3x3.
+        const scale = Math.max(cols / sourceWidth, rows / sourceHeight);
         const dw = sourceWidth * scale;
         const dh = sourceHeight * scale;
         const dx = (cols - dw) / 2;
@@ -188,22 +205,37 @@ const BottomSection = ({ mode, sourceData, matrixSize, clearDrawTrigger, serialC
 
       for (let y = 0; y < rows; y++) {
         for (let x = 0; x < cols; x++) {
-          const index = (y * cols + x) * 4;
-          const r = data[index];
-          const g = data[index + 1];
-          const b = data[index + 2];
+          const index = y * cols + x;
+          const pixelIndex = index * 4;
+          const r = data[pixelIndex];
+          const g = data[pixelIndex + 1];
+          const b = data[pixelIndex + 2];
           
           const brightness = 0.299 * r + 0.587 * g + 0.114 * b;
           const isOn = brightness > 127;
-          matrixData[y * cols + x] = isOn ? 1 : 0;
+          const state = isOn ? 1 : 0;
+          matrixData[index] = state;
           
-          dCtx.drawImage(isOn ? pins.on : pins.off, x * cellSize, y * cellSize);
+          if (state !== lastDrawnStateRef.current[index]) {
+            dCtx.fillStyle = '#0a0a0f';
+            dCtx.fillRect(x * cellSize, y * cellSize, cellSize, cellSize);
+            dCtx.drawImage(isOn ? pins.on : pins.off, x * cellSize, y * cellSize);
+            lastDrawnStateRef.current[index] = state;
+          }
         }
       }
     } else {
       for (let y = 0; y < rows; y++) {
         for (let x = 0; x < cols; x++) {
-          dCtx.drawImage(pins.off, x * cellSize, y * cellSize);
+          const index = y * cols + x;
+          matrixData[index] = 0;
+          
+          if (0 !== lastDrawnStateRef.current[index]) {
+            dCtx.fillStyle = '#0a0a0f';
+            dCtx.fillRect(x * cellSize, y * cellSize, cellSize, cellSize);
+            dCtx.drawImage(pins.off, x * cellSize, y * cellSize);
+            lastDrawnStateRef.current[index] = 0;
+          }
         }
       }
     }
